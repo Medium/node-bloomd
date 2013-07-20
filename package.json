@@ -1,5 +1,5 @@
 {
-    "name": "node-bloomd"
+    "name": "bloomd"
   , "description": "NodeJS Driver for BloomD"
   , "version": "0.0.1"
   , "homepage": "https://github.com/majelbstoat/node-bloomd"
@@ -9,8 +9,8 @@
   , "contributors": [
 
     ]
-  , "keywords": ["node-bloomd"]
-  , "main": "lib/bloomd.js"
+  , "keywords": ["bloomd", "bloom", "filter"]
+  , "main": "index.js"
   , "repository": {
       "type": "git"
     , "url": "https://github.com/majelbstoat/node-bloomd.git"
