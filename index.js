@@ -381,3 +381,7 @@ exports.createClient = function (options) {
   return new BloomClient(netClient, options)
 }
 
+exports.print = function (error, data) {
+    console.log(data)
+}
+
