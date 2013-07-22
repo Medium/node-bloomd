@@ -16,6 +16,7 @@
     , "url": "https://github.com/majelbstoat/node-bloomd.git"
   }
   , "dependencies": {
+  	"byline": "3.0.1"
   }
   , "devDependencies": {
         "nodeunit": "0.7.4"
