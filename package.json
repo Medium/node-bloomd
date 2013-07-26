@@ -1,8 +1,8 @@
 {
     "name": "bloomd"
   , "description": "NodeJS Driver for BloomD"
-  , "version": "0.1.0"
-  , "homepage": "https://github.com/majelbstoat/node-bloomd"
+  , "version": "0.1.1"
+  , "homepage": "https://github.com/obvious/node-bloomd"
   , "authors": [
     "Jamie Talbot <jamie@jamietalbot.com> (https://github.com/majelbstoat)"
   ]
@@ -13,7 +13,7 @@
   , "main": "index.js"
   , "repository": {
       "type": "git"
-    , "url": "https://github.com/majelbstoat/node-bloomd.git"
+    , "url": "https://github.com/obvious/node-bloomd.git"
   }
   , "dependencies": {
   }

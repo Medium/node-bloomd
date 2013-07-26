@@ -58,3 +58,25 @@ Still To Do
 * Instrumentation and optimisation.
 * Better documentation.
 
+Contributions
+-------------
+
+Questions, comments, bug reports and pull requests are all welcomed.
+
+In particular, improvements that address any of the tasks on the above
+list would be great.
+
+Author
+------
+
+[Jamie Talbot](https://github.com/majelbstoat), supported by
+[Medium](https://medium.com).
+
+License
+-------
+
+Copyright 2013 [Medium](https://medium.com)
+
+Licensed under Apache License Version 2.0.  Details in the attached LICENSE
+file.
+
