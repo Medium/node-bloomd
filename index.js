@@ -150,7 +150,7 @@ BloomClient.prototype.list = function (prefix, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.drop = function (filterName, callback) {
-  this._process('drop', [filterName], responseTypes.CONFIRMATION, callback)
+  this._process('drop', [filterName], responseTypes.DROP_CONFIRMATION, callback)
 }
 
 /**
@@ -322,6 +322,10 @@ BloomClient.prototype._onReadable = function () {
 
         case responseTypes.CONFIRMATION:
           data = ResponseParser.parseConfirmation(response)
+          break
+
+       case responseTypes.DROP_CONFIRMATION:
+          data = ResponseParser.parseDropConfirmation(response)
           break
 
         case responseTypes.INFO:

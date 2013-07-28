@@ -22,7 +22,46 @@ function elapsedTime(since, message) {
   return elapsed
 }
 
+/**
+ * We use different named filters for each, as bloomd does not allow for the creation
+ * of a filter while it is deleting one of the same name, and this library doesn't
+ * currently handle this case.
+ *
+ * TODO(jamie) Find a way to generalise the boilerplate.
+ */
 
+
+/**
+ * Tests that calling setSafe on a filter actually calls the original
+ * callback if the filter already exists.
+ */
+exports.setAndCreateTestFilterExists = function (test) {
+  var filterName = 'set_and_create_already_exists'
+  var bloomClient = bloom.createClient()
+  var called = false
+
+  bloomClient.on('ready', function() {
+    // Create a filter.
+    bloomClient.create(filterName, {}, function (error, data) {
+      test.equals(data, true, 'Failed to create filter')
+    })
+
+    bloomClient.setSafe(filterName, 'monkey', function(error, data) {
+      test.equals(data, true)
+      called = true
+    })
+
+    bloomClient.check(filterName, 'monkey', function(error, data) {
+      test.equals(data, true)
+    })
+
+    bloomClient.drop(filterName, function() {
+      bloomClient.dispose()
+      test.equals(called, true, 'The original callback was not called')
+      test.done()
+    })
+  })
+}
 
 /**
  * Tests the setting of a key on a filter that doesn't exist, that the
@@ -59,38 +98,6 @@ exports.setAndCreateTestFilterDoesNotExist = function (test) {
 }
 
 /**
- * Tests that calling setSafe on a filter actually calls the original
- * callback if the filter already exists.
- */
-exports.setAndCreateTestFilterExists = function (test) {
-  var filterName = 'set_and_create_already_exists'
-  var bloomClient = bloom.createClient()
-  var called = false
-
-  bloomClient.on('ready', function() {
-    // Create a filter.
-    bloomClient.create(filterName, {}, function (error, data) {
-      test.equals(data, true, 'Failed to create filter')
-    })
-
-    bloomClient.setSafe(filterName, 'monkey', function(error, data) {
-      test.equals(data, true)
-      called = true
-    })
-
-    bloomClient.check(filterName, 'monkey', function(error, data) {
-      test.equals(data, true)
-    })
-
-    bloomClient.drop(filterName, function() {
-      bloomClient.dispose()
-      test.equals(called, true, 'The original callback was not called')
-      test.done()
-    })
-  })
-}
-
-/**
  * Tests the setting of a key on a filter that doesn't exist, in the situation
  * where the creation of the filter fails for some reason.
  *
@@ -119,14 +126,6 @@ exports.setAndCreateTestFilterCannotBeCreated = function (test) {
     })
   })
 }
-
-/**
- * We use different named filters for each, as bloomd does not allow for the creation
- * of a filter while it is deleting one of the same name, and this library doesn't
- * currently handle this case.
- *
- * TODO(jamie) Find a way to generalise the boilerplate.
- */
 
 /**
  * Test insertion of 235k items, into a filter initially sized for 20k, forcing multiple resizes.
@@ -167,7 +166,7 @@ exports.bulkPerformance = function (test) {
  */
 exports.consecutiveInfo = function (test) {
   var filterName = 'consecutive_info'
-  var bloomClient = bloom.createClient({debug: true})
+  var bloomClient = bloom.createClient()
 
   // Create a filter.
   bloomClient.create(filterName, {
