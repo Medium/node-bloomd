@@ -24,11 +24,12 @@ var net = require('net'),
  * More info here: http://en.wikipedia.org/wiki/Bloom_filter
  *
  * TODO(jamie)
- *  + Stream Write Buffering
- *  + Command Buffering for quick calls after client creation.
+ *  + Safe Dropping
  *  + Retry and reconnect support
+ *  + Maintain order of commands on a filter, even when using *safe.
  *  + More Error checking
  *  ? StreamNoDelay configuration
+ *  ? Rename setSafe command to set, and set to setUnchecked
  *
  * Options are:
  *
@@ -44,6 +45,7 @@ function BloomClient(stream, options) {
   this.ready = false
   this.commandQueue = []
   this.offlineQueue = []
+  this.commandsSent = 0
 
   var self = this
 
@@ -61,6 +63,10 @@ function BloomClient(stream, options) {
 
   stream.on('end', function() {
     self._connectionClosed('end')
+  })
+  
+  stream.on('drain', function () {
+  	self._drain()
   })
 
   this.stream.pipe(this.responseParser)
@@ -117,7 +123,7 @@ BloomClient.prototype.create = function (filterName, options, callback) {
   for (var key in options) {
     args.push(key + '=' + options[key])
   }
-  this._send('create', args, responseTypes.CONFIRMATION, callback)
+  this._process('create', args, responseTypes.CONFIRMATION, callback)
 }
 
 /**
@@ -132,7 +138,7 @@ BloomClient.prototype.create = function (filterName, options, callback) {
  */
 BloomClient.prototype.list = function (prefix, callback) {
   var args = prefix ? [prefix] : []
-  this._send('list', args, responseTypes.FILTER_LIST, callback)
+  this._process('list', args, responseTypes.FILTER_LIST, callback)
 }
 
 /**
@@ -144,7 +150,7 @@ BloomClient.prototype.list = function (prefix, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.drop = function (filterName, callback) {
-  this._send('drop', [filterName], responseTypes.CONFIRMATION, callback)
+  this._process('drop', [filterName], responseTypes.CONFIRMATION, callback)
 }
 
 /**
@@ -154,7 +160,7 @@ BloomClient.prototype.drop = function (filterName, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.close = function (filterName, callback) {
-  this._send('close', [filterName], responseTypes.CONFIRMATION, callback)
+  this._process('close', [filterName], responseTypes.CONFIRMATION, callback)
 }
 
 /**
@@ -164,7 +170,7 @@ BloomClient.prototype.close = function (filterName, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.clear = function (filterName, callback) {
-  this._send('clear', [filterName], responseTypes.CONFIRMATION, callback)
+  this._process('clear', [filterName], responseTypes.CONFIRMATION, callback)
 }
 
 /**
@@ -178,7 +184,7 @@ BloomClient.prototype.clear = function (filterName, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.check = function (filterName, key, callback) {
-  this._send('c', [filterName, key], responseTypes.BOOL, callback)
+  this._process('c', [filterName, key], responseTypes.BOOL, callback)
 }
 
 /**
@@ -193,7 +199,7 @@ BloomClient.prototype.check = function (filterName, key, callback) {
  */
 BloomClient.prototype.multi = function (filterName, keys, callback) {
   keys.unshift(filterName)
-  this._send('m', keys, responseTypes.BOOL_LIST, callback)
+  this._process('m', keys, responseTypes.BOOL_LIST, callback)
 }
 
 /**
@@ -207,7 +213,7 @@ BloomClient.prototype.multi = function (filterName, keys, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.set = function (filterName, key, callback) {
-  this._send('s', [filterName, key], responseTypes.BOOL, callback)
+  this._process('s', [filterName, key], responseTypes.BOOL, callback)
 }
 
 /**
@@ -223,7 +229,7 @@ BloomClient.prototype.set = function (filterName, key, callback) {
  */
 BloomClient.prototype.bulk = function (filterName, keys, callback) {
   keys.unshift(filterName)
-  this._send('b', keys, responseTypes.BOOL_LIST, callback)
+  this._process('b', keys, responseTypes.BOOL_LIST, callback)
 }
 
 /**
@@ -235,7 +241,7 @@ BloomClient.prototype.bulk = function (filterName, keys, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.info = function (filterName, callback) {
-  this._send('info', [filterName], responseTypes.INFO, callback)
+  this._process('info', [filterName], responseTypes.INFO, callback)
 }
 
 /**
@@ -249,7 +255,7 @@ BloomClient.prototype.info = function (filterName, callback) {
  */
 BloomClient.prototype.flush = function (filterName, callback) {
   var args = filterName ? [filterName] : []
-  this._send('flush', args, responseTypes.CONFIRMATION, callback)
+  this._process('flush', args, responseTypes.CONFIRMATION, callback)
 }
 
 // Extended Commands
@@ -348,8 +354,8 @@ BloomClient.prototype._onConnect = function () {
     console.log('Connected to ' + this.options.host + ':' + this.options.port)
   }
 
-  this.ready = true
-  this.emit('ready')
+  this.emit('connected')
+  this._drain()
 }
 
 /**
@@ -380,25 +386,85 @@ BloomClient.prototype._connectionClosed = function (reason) {
 }
 
 /**
- * Sends a command to the server.
+ * Prepares a command to be sent.  If the stream is ready to receive a command, 
+ * sends it immediately, otherwise queues it up to be sent when the stream is ready.
  *
- * @param {string} command
+ * @param {string} commandName
  * @param {Array} args
  * @param {string} responseType one of ResponseParser.responseTypes
  * @param {Function} callback
  */
-BloomClient.prototype._send = function(command, args, responseType, callback) {
+BloomClient.prototype._process = function(commandName, args, responseType, callback) {
   args = args || []
-  args.unshift(command)
-  var line = args.join(' ') + '\n'
-
-  this.commandQueue.push({
+  args.unshift(commandName)
+  var command = {
     arguments: args,
     responseType: responseType,
     callback: callback
-  })
+  }
+  
+  if (this.ready) {
+    if (this.options.debug) {
+      console.log("Processing:", commandName)
+    }
+    this._send(command)
+  } else {
+    if (this.options.debug) {
+      console.log("Buffering command:", commandName)
+    }
+    this.offlineQueue.push(command)
+  }  
+}
 
-  this.stream.write(line)
+/**
+ * Attempts to send a command to bloomd.  If the command was sent, pushes it
+ * onto the command queue for processing when the response arrives.
+ *
+ * Returns a boolean indicating sent status.
+ * 
+ * @param {Object} command
+ * @return {boolean}
+ */
+BloomClient.prototype._send = function (command) {
+  var line = command.arguments.join(' ') + '\n'  
+  var processedEntirely = this.stream.write(line)
+
+  if (this.options.debug) {
+    console.log("Sent:", command.arguments[0])
+  }
+
+  this.commandsSent++
+  this.commandQueue.push(command)
+
+  if (!processedEntirely) {
+    if (this.options.debug) {
+      console.log("Waiting after full buffer:", command.arguments[0])
+    }
+    this.ready = false
+  }
+  
+  return processedEntirely
+}
+
+/**
+ * Processes the offline command queue.
+ *
+ * Marks the client as ready when there is nothing left in the queue.
+ */
+BloomClient.prototype._drain = function () {
+  while (this.offlineQueue.length) {
+    var command = this.offlineQueue.shift()
+    if (this.options.debug) {
+      console.log("Sending buffered command:", command.arguments[0])
+    }
+    
+    if (!this._send(command)) {
+      // Buffer was filled from this command.  Wait some more.
+      return
+    }
+  }
+  this.ready = true
+  this.emit('ready')
 }
 
 // Helper Functions
@@ -470,3 +536,4 @@ exports.createClient = function (options) {
 exports.print = function (error, data) {
     console.log(data)
 }
+
