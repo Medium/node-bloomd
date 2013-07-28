@@ -26,7 +26,6 @@ var net = require('net'),
  * TODO(jamie)
  *  + Stream Write Buffering
  *  + Command Buffering for quick calls after client creation.
- *  + Partial block rememberance, to avoid rework.
  *  + Retry and reconnect support
  *  + More Error checking
  *  ? StreamNoDelay configuration
