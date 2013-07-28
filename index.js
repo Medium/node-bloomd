@@ -49,123 +49,31 @@ function BloomClient(stream, options) {
   var self = this
 
   stream.on('connect', function() {
-    self.onConnect()
+    self._onConnect()
   })
 
   stream.on('error', function(message) {
-    self.onError(message.message)
+    self._onError(message.message)
   })
 
   stream.on('close', function() {
-    self.connectionClosed('close')
+    self._connectionClosed('close')
   })
 
   stream.on('end', function() {
-    self.connectionClosed('end')
+    self._connectionClosed('end')
   })
 
   this.stream.pipe(this.responseParser)
 
   this.responseParser.on('readable', function() {
-    self.onReadable()
+    self._onReadable()
   })
 
   events.EventEmitter.call(this)
+
 }
 util.inherits(BloomClient, events.EventEmitter)
-
-/**
- * Fires when the parser is able to send back a complete response from the server.
- *
- * Because operations are performed in the order they are received, we can safely
- * unshift a command off the queue and use it to match the response to the callback
- * that is waiting for it.
- */
-BloomClient.prototype.onReadable = function () {
-  var response
-  while (response = this.responseParser.read()) {
-    var command = this.commandQueue.shift(),
-        error = null,
-        data = null
-
-    try {
-      switch (command.responseType) {
-        case responseTypes.BOOL:
-          data = ResponseParser.parseBool(response)
-          break
-
-        case responseTypes.BOOL_LIST:
-          data = ResponseParser.parseBoolList(response, command.arguments.slice(2))
-          break
-
-        case responseTypes.FILTER_LIST:
-          data = ResponseParser.parseFilterList(response)
-          break
-
-        case responseTypes.CONFIRMATION:
-          data = ResponseParser.parseConfirmation(response)
-          break
-
-        case responseTypes.INFO:
-          // command.arguments[1] is the name of the filter, passed back for completeness.
-          data = ResponseParser.parseInfo(response, command.arguments[1])
-          break
-
-        default:
-          throw new Error('Unknown response type: ' + command.responseType)
-          break
-      }
-    } catch (err) {
-      error = err
-    }
-
-    // Callbacks are optional.
-    if (command.callback) {
-      command.callback(error, data)
-    }
-  }
-}
-
-/**
- * Fires when the underlying stream connects.
- *
- * TODO(jamie) Support queuing of commands before ready, and then flush them here.
- */
-BloomClient.prototype.onConnect = function () {
-  if (this.options.debug) {
-    console.log('Connected to ' + this.options.host + ':' + this.options.port)
-  }
-
-    this.ready = true
-    this.emit('ready')
-}
-
-/**
- * Fires when there is an error on the underlying stream.
- */
-BloomClient.prototype.onError = function (msg) {
-  var message = 'Connection failed to ' + this.options.host + ':' + this.options.port + ' (' + msg + ')'
-  if (this.options.debug) {
-    console.warn(message)
-  }
-
-  this.connected = false
-  this.emit('error', new Error(message))
-  this.connectionClosed('error')
-}
-
-/**
- * Fires when a connection is closed, either through error, or naturally.
- *
- * TODO(jamie) Support reconnects, and flushing of queue for natural closure.
- *
- * @param {string} reason
- */
-BloomClient.prototype.connectionClosed = function (reason) {
-  if (this.options.debug) {
-    console.warn('Connection closed (' + reason + ')')
-  }
-}
 
 // API
 
@@ -183,22 +91,6 @@ BloomClient.prototype.isReady = function() {
  */
 BloomClient.prototype.dispose = function () {
   this.stream.end()
-}
-
-// Extended Client Commands
-
-
-BloomClient.prototype.bulkSet = BloomClient.prototype.bulk
-
-BloomClient.prototype.multiCheck = BloomClient.prototype.multi
-
-BloomClient.prototype.setSafe = function (filterName, key, createOptions, callback) {
-  this.set(filterName, key,
-      this._callbackCreateFilterIfNotExists.bind(this, filterName, createOptions,
-          this.set.bind(this, filterName, key),
-          callback
-      )
-  )
 }
 
 // Standard Bloomd Commands
@@ -243,7 +135,6 @@ BloomClient.prototype.list = function (prefix, callback) {
   var args = prefix ? [prefix] : []
   this._send('list', args, responseTypes.FILTER_LIST, callback)
 }
-
 
 /**
  * Drops the specified filter.
@@ -362,7 +253,132 @@ BloomClient.prototype.flush = function (filterName, callback) {
   this._send('flush', args, responseTypes.CONFIRMATION, callback)
 }
 
+// Extended Commands
+
+/**
+ * Alias for bulk, for ease of remembering.
+ *
+ * Bulk sets many items.
+ *
+ * @see BloomClient.prototype.bulk
+ */
+BloomClient.prototype.bulkSet = BloomClient.prototype.bulk
+
+/**
+ * Alias for multi, for ease of remembering.
+ *
+ * Multi checks many items.
+ *
+ * @see BloomClient.prototype.multi
+ */
+BloomClient.prototype.multiCheck = BloomClient.prototype.multi
+
+/**
+ * Safe versions of standard functions.
+ * They appear on the prototype as setSafe, checkSafe, bulkSafe etc.
+ *
+ * @see _makeSafe()
+ */
+var _safeCommands = ['set', 'check', 'bulk', 'multi', 'info']
+for (var i = 0, l = _safeCommands.length; i < l; i++) {
+  var command = _safeCommands[i]
+  BloomClient.prototype[command + 'Safe'] = _makeSafe(BloomClient.prototype[command])
+}
+
 // Private Methods
+
+/**
+ * Fires when the parser is able to send back a complete response from the server.
+ *
+ * Because operations are performed in the order they are received, we can safely
+ * unshift a command off the queue and use it to match the response to the callback
+ * that is waiting for it.
+ */
+BloomClient.prototype._onReadable = function () {
+  var response
+  while (response = this.responseParser.read()) {
+    var command = this.commandQueue.shift(),
+        error = null,
+        data = null
+
+    try {
+      switch (command.responseType) {
+        case responseTypes.BOOL:
+          data = ResponseParser.parseBool(response)
+          break
+
+        case responseTypes.BOOL_LIST:
+          data = ResponseParser.parseBoolList(response, command.arguments.slice(2))
+          break
+
+        case responseTypes.FILTER_LIST:
+          data = ResponseParser.parseFilterList(response)
+          break
+
+        case responseTypes.CONFIRMATION:
+          data = ResponseParser.parseConfirmation(response)
+          break
+
+        case responseTypes.INFO:
+          // command.arguments[1] is the name of the filter, passed back for completeness.
+          data = ResponseParser.parseInfo(response, command.arguments[1])
+          break
+
+        default:
+          throw new Error('Unknown response type: ' + command.responseType)
+          break
+      }
+    } catch (err) {
+      error = err
+    }
+
+    // Callbacks are optional.
+    if (command.callback) {
+      command.callback(error, data)
+    }
+  }
+}
+
+/**
+ * Fires when the underlying stream connects.
+ *
+ * TODO(jamie) Support queuing of commands before ready, and then flush them here.
+ */
+BloomClient.prototype._onConnect = function () {
+  if (this.options.debug) {
+    console.log('Connected to ' + this.options.host + ':' + this.options.port)
+  }
+
+  this.ready = true
+  this.emit('ready')
+}
+
+/**
+ * Fires when there is an error on the underlying stream.
+ */
+BloomClient.prototype._onError = function (msg) {
+  var message = 'Connection failed to ' + this.options.host + ':' + this.options.port + ' (' + msg + ')'
+  if (this.options.debug) {
+    console.warn(message)
+  }
+
+  this.connected = false
+  this.emit('error', new Error(message))
+  this._connectionClosed('error')
+}
+
+/**
+ * Fires when a connection is closed, either through error, or naturally.
+ *
+ * TODO(jamie) Support reconnects, and flushing of queue for natural closure.
+ *
+ * @param {string} reason
+ */
+BloomClient.prototype._connectionClosed = function (reason) {
+  if (this.options.debug) {
+    console.warn('Connection closed (' + reason + ')')
+  }
+}
 
 /**
  * Sends a command to the server.
@@ -386,38 +402,60 @@ BloomClient.prototype._send = function(command, args, responseType, callback) {
   this.stream.write(line)
 }
 
+// Helper Functions
+
 /**
- * Determines if there was an error due to a filter not existing,
- * then creates it and runs the original command, finishing with the original callback.
+ * Returns a function which is a 'safe' version of the supplied command. That is, if
+ * the filter doesn't exist when the command is run, attempts to automatically create
+ * the filter and then re-run the command, transparently to the client.
  *
- * If there is an error in the creation step, returns the downstream error, not the
- * original 'non existent error', to help track down why the creation would be failing.
+ * If there is an error in the creation step, this function returns filter creation
+ * failure, not the original 'filter not found', to help track down why the creation
+ * would be failing.
  *
- * @param {string} filterName
- * @param {Object} createOptions
- * @param {Function} retryCommand
- * @param {Function} retryCallback
- * @param {Object} originalError
- * @param {Object} originalData
+ * @param {Function} command
+ * @return {Function}
  */
-BloomClient.prototype._callbackCreateFilterIfNotExists = function (filterName, createOptions, retryCommand, retryCallback, originalError, originalData) {
-  if (originalError && 'Filter does not exist' === originalError.message) {
-    this.create(filterName, createOptions, function(createError, createData) {
-      if (createError) {
-        // There was an error creating the filter.
-        retryCallback.call(retryCallback, createError, createData)
+function _makeSafe(command) {
+  return function() {
+    // This is a function like setSafe()
+    var self = this
+    var args = Array.prototype.slice.call(arguments, 0)
+    var filterName = args[0]
+    var createOptions = {}
+    var callback
+    if (args[args.length - 1] instanceof Function) {
+      callback = args.pop()
+    } else {
+      createOptions = args.pop()
+      callback = args.pop()
+    }
+    args.push(function(originalError, originalData) {
+      // This is the callback which catches the response to the original command
+      // (e.g. safe, check, bulk, multi etc.)
+      if (originalError && ('Filter does not exist' === originalError.message)) {
+        // Filter didn't exist, try and create it.
+        self.create(filterName, createOptions, function (createError, createData) {
+          // This is callback which catches the response to the create command.
+          if (createError) {
+            // Creation of the filter failed. Run the original callback with this failure.
+            callback.call(callback, createError, createData)
+          } else {
+            // Creation succeeded, re-run the command.
+            command.apply(self, args)
+          }
+        })
       } else {
-        // Call the original command again.
-        retryCommand.call(retryCommand, retryCallback)
+        // The filter exists, so run the original callback.
+        callback.call(callback, originalError, originalData)
       }
     })
-  } else {
-    // Original command succeeded, pass the response through.
-    retryCallback.call(retryCallback, originalError, originalData)
+    // Execute the requested command.
+    command.apply(self, args)
   }
 }
 
-//Exports
+// Exports
 
 exports.BloomClient = BloomClient
 
@@ -433,4 +471,3 @@ exports.createClient = function (options) {
 exports.print = function (error, data) {
     console.log(data)
 }
-
