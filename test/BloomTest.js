@@ -1,6 +1,11 @@
 var bloom = require('../index'),
-	fs = require('fs'),
-	assert = require('assert')
+  fs = require('fs'),
+  assert = require('assert')
+
+// Delay in ms that we should wait after doing a drop command before issuing
+// a create command to the same filter name, due to bloomd's limitations.
+// If tests are failing, try increasing this.
+var DROP_THEN_CREATE_DELAY_MS = 200
 
 /**
  * Helper function to time performance in ms.
@@ -10,11 +15,11 @@ var bloom = require('../index'),
  * @return {number}
  */
 function elapsedTime(since, message) {
-	var interval = process.hrtime(since)	
-	var elapsed = (interval[0] * 1000) + (interval[1] / 1000000)
-	message = message ? message + ': ' : ''
-	console.log(message + elapsed.toFixed(3) + "ms")
-	return elapsed
+  var interval = process.hrtime(since)
+  var elapsed = (interval[0] * 1000) + (interval[1] / 1000000)
+  message = message ? message + ': ' : ''
+  console.log(message + elapsed.toFixed(3) + 'ms')
+  return elapsed
 }
 
 /**
@@ -25,74 +30,170 @@ function elapsedTime(since, message) {
  * TODO(jamie) Find a way to generalise the boilerplate.
  */
 
-/** 
+/**
  * Test insertion of 235k items, into a filter initially sized for 20k, forcing multiple resizes.
  */
 exports.bulkPerformance = function (test) {
-	var filterName = 'bulk_performance'
-	var bloomClient = bloom.createClient()
+  var filterName = 'bulk_performance'
+  var bloomClient = bloom.createClient()
 
-	bloomClient.on('ready', function() {				
-		// Read in a dictionary.
-		fs.readFile('./test/words.txt', 'utf8', function (error, data) {
+  bloomClient.on('ready', function() {
+    // Read in a dictionary.
+    fs.readFile('./test/words.txt', 'utf8', function (error, data) {
 
-			// Create a filter.
-			bloomClient.create(filterName, {
-				prob: 0.01,
-				capacity: 20000
-			})
+      // Create a filter.
+      bloomClient.create(filterName, {
+        prob: 0.01,
+        capacity: 20000
+      })
 
-			// Insert lots of data.
-			var lines = data.split('\n')
-			var start = process.hrtime()
-			bloomClient.bulk(filterName, lines, function (error, data) {
-				var elapsed = elapsedTime(start, "Inserted " + lines.length + " items")
-				
-				// Totally arbitrary, but should be plenty of room on even 
-				// a moderate laptop with a single worker.
-				test.ok(elapsed < 1000, "Bulk insert considered too slow")
-			})
-			
-			bloomClient.drop(filterName, function() {
-				bloomClient.dispose()
-				test.done()				
-			})			
-		});
-	})
+      // Insert lots of data.
+      var lines = data.split('\n')
+      var start = process.hrtime()
+      bloomClient.bulk(filterName, lines, function (error, data) {
+        var elapsed = elapsedTime(start, 'Inserted ' + lines.length + ' items')
+
+        // Totally arbitrary, but should be plenty of room on even
+        // a moderate laptop with a single worker.
+        test.ok(elapsed < 1000, 'Bulk insert considered too slow')
+      })
+
+      bloomClient.drop(filterName, function() {
+        bloomClient.dispose()
+        test.done()
+      })
+    });
+  })
 }
 
-/** 
+/**
  * Test repeated calls to info, to force data buffering that will
  * result in incomplete lists, and give the stream transformation code a workout.
  */
 exports.consecutiveInfo = function (test) {
-	var filterName = 'consecutive_info'
-	var bloomClient = bloom.createClient()
+  var filterName = 'consecutive_info'
+  var bloomClient = bloom.createClient()
 
-	bloomClient.on('ready', function() {				
-		// Create a filter.
-		bloomClient.create(filterName, {
-			prob: 0.01,
-			capacity: 20000
-		})
+  bloomClient.on('ready', function() {
+    // Create a filter.
+    bloomClient.create(filterName, {
+      prob: 0.01,
+      capacity: 20000
+    })
 
-		var iterations = 1000
-		var responseCount = 0		
-		function callback(error, data) {
-			test.equals(data.name, filterName, "Didn't get back the same thing we put it")
-			responseCount++		
-		}
+    var iterations = 1000
+    var responseCount = 0
+    function callback(error, data) {
+      test.equals(data.name, filterName, 'Did not get back the same thing we put it')
+      responseCount++
+    }
 
-		for (var i = 0; i < iterations; i++) {
-			bloomClient.info(filterName, callback)
-		}
-		
-		bloomClient.drop(filterName, function() {
-			bloomClient.dispose()
-			test.equals(iterations, responseCount, "Didn't iterate the correct number of times")
-			test.done()
-		})
-	})
+    for (var i = 0; i < iterations; i++) {
+      bloomClient.info(filterName, callback)
+    }
+
+    bloomClient.drop(filterName, function() {
+      bloomClient.dispose()
+      test.equals(iterations, responseCount, 'Did not iterate the correct number of times')
+      test.done()
+    })
+  })
+}
+
+/**
+ * Tests that calling setSafe on a filter actually calls the original
+ * callback if the filter already exists.
+ */
+exports.setAndCreateTestFilterExists = function (test) {
+  var filterName = 'set_and_create_already_exists'
+  var bloomClient = bloom.createClient()
+  var called = false
+
+  bloomClient.on('ready', function() {
+    // Create a filter.
+    bloomClient.create(filterName, {}, function (error, data) {
+      test.equals(data, true, 'Failed to create filter')
+    })
+
+    bloomClient.setSafe(filterName, 'monkey', {}, function(error, data) {
+      test.equals(data, true)
+      called = true
+    })
+
+    bloomClient.check(filterName, 'monkey', function(error, data) {
+      test.equals(data, true)
+    })
+
+    bloomClient.drop(filterName, function() {
+      bloomClient.dispose()
+      test.equals(called, true, 'The original callback was not called')
+      test.done()
+    })
+  })
+}
+
+/**
+ * Tests the setting of a key on a filter that doesn't exist, that the
+ * filter is automatically created, that the key is set, and that the
+ * original callback is still called.
+ */
+exports.setAndCreateTestFilterDoesNotExist = function (test) {
+  var filterName = 'set_and_create_non_existent'
+  var bloomClient = bloom.createClient()
+
+  bloomClient.on('ready', function() {
+    bloomClient.drop(filterName, function (error, data) {
+      // This is a bit janky, as we have to drop the bloomClient to
+      // ensure that the filter doesn't exist beforehand,
+      // but bloomd has a period of time where you can't create immediately
+      // after a drop where creation will fail, so we wait for a bit.
+      // Non-deterministic, but probably ok.
+      setTimeout(function() {
+        bloomClient.setSafe(filterName, 'monkey', {}, function(error, data) {
+          test.equals(data, true)
+
+          // The cleanup drop command also has to come in this callback,
+          // otherwise it will be in the queue before the create and retry
+          // commands that are generated by the non-existence of the filter.
+          // This is why promises are good.
+          bloomClient.drop(filterName, function() {
+            bloomClient.dispose()
+            test.done()
+          })
+        })
+      }, DROP_THEN_CREATE_DELAY_MS)
+    })
+  })
+}
+
+/**
+ * Tests the setting of a key on a filter that doesn't exist, in the situation
+ * where the creation of the filter fails for some reason.
+ *
+ * We can simulate this by using a sufficiently low desired capacity.
+ */
+exports.setAndCreateTestFilterCannotBeCreated = function (test) {
+  var filterName = 'set_and_create_error_creating'
+  var bloomClient = bloom.createClient()
+
+  bloomClient.on('ready', function() {
+    bloomClient.drop(filterName, function (error, data) {
+      // Same as prior test, also janky.
+      setTimeout(function() {
+        bloomClient.setSafe(filterName, 'monkey', {
+          // A low capacity will cause a creation failure due to bad arguments.
+          capacity: 100
+        }, function(error, data) {
+          test.equals(error.message, 'Client Error: Bad arguments')
+
+          bloomClient.drop(filterName, function() {
+            bloomClient.dispose()
+            test.done()
+          })
+        })
+      }, DROP_THEN_CREATE_DELAY_MS)
+    })
+  })
 }
 
 /**
@@ -101,69 +202,69 @@ exports.consecutiveInfo = function (test) {
  * https://github.com/armon/bloomd/blob/master/README.md
  */
 exports.canonicalTest = function (test) {
-	var filterName = 'canonical_test'
-	var bloomClient = bloom.createClient()
-	
-	bloomClient.on('ready', function() {
-		// Create a filter.
-		bloomClient.list(null, function(error, data) {
-			test.equals(data.length, 0, "We had a list, somehow.")
-		})
-		
-		bloomClient.create(filterName, {}, function (error, data) {
-			test.equals(data, true, "Failed to create filter")
-		})
+  var filterName = 'canonical_test'
+  var bloomClient = bloom.createClient()
 
-		bloomClient.check(filterName, 'zipzab', function (error, data) {
-			test.deepEqual(data, false, "zipzab should not exist")
-		})
+  bloomClient.on('ready', function() {
+    // Create a filter.
+    bloomClient.list(null, function(error, data) {
+      test.equals(data.length, 0, 'We had a list, somehow.')
+    })
 
-		bloomClient.set(filterName, 'zipzab', function (error, data) {
-			test.equals(data, true, "zipzab should have been created")
-		})
-		
-		bloomClient.check(filterName, 'zipzab', function (error, data) {
-			test.equals(data, true, "zipzab should now exist")
-		})
+    bloomClient.create(filterName, {}, function (error, data) {
+      test.equals(data, true, 'Failed to create filter')
+    })
 
-		bloomClient.multi(filterName, ['zipzab', 'blah', 'boo'], function (error, data) {
-			test.deepEqual(data, {
-				zipzab: true,
-				blah: false,
-				boo: false
-			})
-		})
+    bloomClient.check(filterName, 'zipzab', function (error, data) {
+      test.deepEqual(data, false, 'zipzab should not exist')
+    })
 
-		bloomClient.bulk(filterName, ['zipzab', 'blah', 'boo'], function (error, data) {
-			test.deepEqual(data, {
-				zipzab: false,
-				blah: true,
-				boo: true
-			})
-		})
+    bloomClient.set(filterName, 'zipzab', function (error, data) {
+      test.equals(data, true, 'zipzab should have been created')
+    })
 
-		bloomClient.multi(filterName, ['zipzab', 'blah', 'boo'], function (error, data) {
-			test.deepEqual(data, {
-				zipzab: true,
-				blah: true,
-				boo: true
-			})
-		})
+    bloomClient.check(filterName, 'zipzab', function (error, data) {
+      test.equals(data, true, 'zipzab should now exist')
+    })
 
-		bloomClient.list(null, function(error, data) {
-			test.equals(data.length, 1, "We had a list, somehow.")
-			test.equals(data[0].name, filterName)
-		})
-		
-		bloomClient.drop(filterName, function (error, data) {
-			test.equals(data, true, "Failed to drop filter")
-		})
-		
-		bloomClient.list(null, function(error, data) {
-			bloomClient.dispose()
-			test.equals(data.length, 0, "We had a list, somehow.")
-			test.done()			
-		})
-	})	
+    bloomClient.multi(filterName, ['zipzab', 'blah', 'boo'], function (error, data) {
+      test.deepEqual(data, {
+        zipzab: true,
+        blah: false,
+        boo: false
+      })
+    })
+
+    bloomClient.bulk(filterName, ['zipzab', 'blah', 'boo'], function (error, data) {
+      test.deepEqual(data, {
+        zipzab: false,
+        blah: true,
+        boo: true
+      })
+    })
+
+    bloomClient.multi(filterName, ['zipzab', 'blah', 'boo'], function (error, data) {
+      test.deepEqual(data, {
+        zipzab: true,
+        blah: true,
+        boo: true
+      })
+    })
+
+    bloomClient.list(null, function(error, data) {
+      test.equals(data.length, 1, 'We had a list, somehow.')
+      test.equals(data[0].name, filterName)
+    })
+
+    bloomClient.drop(filterName, function (error, data) {
+      test.equals(data, true, 'Failed to drop filter')
+    })
+
+    bloomClient.list(null, function(error, data) {
+      bloomClient.dispose()
+      test.equals(data.length, 0, 'We had a list, somehow.')
+      test.done()
+    })
+  })
 
 }
