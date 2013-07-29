@@ -8,28 +8,12 @@ var bloom = require('../index'),
 var DROP_THEN_CREATE_DELAY_MS = 200
 
 /**
- * Helper function to time performance in ms.
- *
- * @param {Array} since A previous call to process.hrtime()
- * @param {string} message an optional message
- * @return {number}
- */
-function elapsedTime(since, message) {
-  var interval = process.hrtime(since)
-  var elapsed = (interval[0] * 1000) + (interval[1] / 1000000)
-  message = message ? message + ': ' : ''
-  console.log(message + elapsed.toFixed(3) + 'ms')
-  return elapsed
-}
-
-/**
  * We use different named filters for each, as bloomd does not allow for the creation
  * of a filter while it is deleting one of the same name, and this library doesn't
  * currently handle this case.
  *
  * TODO(jamie) Find a way to generalise the boilerplate.
  */
-
 
 /**
  * Tests that calling setSafe on a filter actually calls the original
@@ -40,26 +24,24 @@ exports.setAndCreateTestFilterExists = function (test) {
   var bloomClient = bloom.createClient()
   var called = false
 
-  bloomClient.on('ready', function() {
-    // Create a filter.
-    bloomClient.create(filterName, {}, function (error, data) {
-      test.equals(data, true, 'Failed to create filter')
-    })
+  // Create a filter.
+  bloomClient.create(filterName, {}, function (error, data) {
+    test.equals(data, true, 'Failed to create filter')
+  })
 
-    bloomClient.setSafe(filterName, 'monkey', function(error, data) {
-      test.equals(data, true)
-      called = true
-    })
+  bloomClient.setSafe(filterName, 'monkey', function(error, data) {
+    test.equals(data, true)
+    called = true
+  })
 
-    bloomClient.check(filterName, 'monkey', function(error, data) {
-      test.equals(data, true)
-    })
+  bloomClient.check(filterName, 'monkey', function(error, data) {
+    test.equals(data, true)
+  })
 
-    bloomClient.drop(filterName, function() {
-      bloomClient.dispose()
-      test.equals(called, true, 'The original callback was not called')
-      test.done()
-    })
+  bloomClient.drop(filterName, function() {
+    bloomClient.dispose()
+    test.equals(called, true, 'The original callback was not called')
+    test.done()
   })
 }
 
@@ -98,6 +80,95 @@ exports.setAndCreateTestFilterDoesNotExist = function (test) {
 }
 
 /**
+ * Tests the checking of a key after we call setSafe. When a filter doesn't exist, setSafe
+ * automatically creates it, then sets the value.  If a client issues a check command after
+ * a setSafe command, it should return true, even if the filter didn't exist.
+ */
+exports.checkAfterSetSafe = function (test) {
+  var filterName = 'check_after_set_safe'
+  var bloomClient = bloom.createClient()
+
+  bloomClient.drop(filterName, function (error, data) {
+    // Also janky.
+    setTimeout(function() {
+      bloomClient.setSafe(filterName, 'monkey', function(error, data) {
+        test.equals(data, true)
+      })
+
+      bloomClient.check(filterName, 'monkey', function(error, data) {
+        test.equals(data, true, 'Check after safe set was not true')
+      })
+
+      bloomClient.drop(filterName, function() {
+        // Drop, Set, Create, Set, Check, Drop
+        test.equals(6, bloomClient.commandsSent)
+        bloomClient.dispose()
+        test.done()
+      })
+    }, DROP_THEN_CREATE_DELAY_MS)
+  })
+}
+
+/**
+ * Tests interleaved consecutive safe and non-safe commands, to ensure they run in the specified order.
+ */
+exports.interleavedSafeNonSafe = function (test) {
+  var filterName = 'interleaved_safe_non_safe'
+  var bloomClient = bloom.createClient()
+
+  bloomClient.drop(filterName, function (error, data) {
+    // Also janky.
+    setTimeout(function() {
+      bloomClient.multiSafe(filterName, ['monkey'], function(error, data) {
+        test.deepEqual(data, {
+          monkey: false
+        })
+      })
+
+      bloomClient.bulk(filterName, ['monkey', 'magic', 'muppet'], function(error, data) {
+        test.deepEqual(data, {
+          monkey: true,
+          magic: true,
+          muppet: true
+        })
+      })
+
+      bloomClient.multiSafe(filterName, ['magic', 'muppet', 'moonbeam'], function(error, data) {
+        test.deepEqual(data, {
+          magic: true,
+          muppet: true,
+          moonbeam: false
+        })
+      })
+
+      bloomClient.bulkSafe(filterName, ['monkey', 'moonbeam'], function(error, data) {
+        test.deepEqual(data, {
+          monkey: false,
+          moonbeam: true
+        })
+      })
+
+      bloomClient.multi(filterName, ['monkey', 'magic', 'muppet', 'moonbeam'], function(error, data) {
+        test.deepEqual(data, {
+          monkey: true,
+          magic: true,
+          muppet: true,
+          moonbeam: true
+        })
+      })
+
+      bloomClient.drop(filterName, function() {
+        // Drop, Multi, Create, Multi, Bulk, Multi, Bulk, Multi, Drop
+        test.equals(9, bloomClient.commandsSent)
+        bloomClient.dispose()
+        test.done()
+      })
+    }, DROP_THEN_CREATE_DELAY_MS)
+  })
+}
+
+
+/**
  * Tests the setting of a key on a filter that doesn't exist, in the situation
  * where the creation of the filter fails for some reason.
  *
@@ -107,28 +178,28 @@ exports.setAndCreateTestFilterCannotBeCreated = function (test) {
   var filterName = 'set_and_create_error_creating'
   var bloomClient = bloom.createClient()
 
-  bloomClient.on('ready', function() {
-    bloomClient.drop(filterName, function (error, data) {
-      // Same as prior test, also janky.
-      setTimeout(function() {
-        bloomClient.setSafe(filterName, 'monkey', function(error, data) {
-          test.equals(error.message, 'Client Error: Bad arguments')
+  bloomClient.drop(filterName, function (error, data) {
+    // Same as prior test, also janky.
+    setTimeout(function() {
+      bloomClient.setSafe(filterName, 'monkey', function(error, data) {
+        test.equals(error.message, 'Client Error: Bad arguments')
 
-          bloomClient.drop(filterName, function() {
-            bloomClient.dispose()
-            test.done()
-          })
-        }, {
-          // A low capacity will cause a creation failure due to bad arguments.
-          capacity: 100
+        bloomClient.drop(filterName, function() {
+          bloomClient.dispose()
+          test.done()
         })
-      }, DROP_THEN_CREATE_DELAY_MS)
-    })
+      }, {
+        // A low capacity will cause a creation failure due to bad arguments.
+        capacity: 100
+      })
+    }, DROP_THEN_CREATE_DELAY_MS)
   })
 }
 
 /**
- * Test insertion of 235k items, into a filter initially sized for 20k, forcing multiple resizes.
+ * Test insertion and subsequent retrieval of 235k items, into a filter initially
+ * sized for 20k, forcing multiple resizes.  We chain the multi on the callback of
+ * the bulk in order to get accurate timings.
  */
 exports.bulkPerformance = function (test) {
   var filterName = 'bulk_performance'
@@ -139,23 +210,52 @@ exports.bulkPerformance = function (test) {
 
     // Create a filter.
     bloomClient.create(filterName, {
-      prob: 0.01,
+      prob: 0.0001,
       capacity: 20000
     })
 
-    // Insert lots of data.
+	// The last line will be blank.
     var lines = data.split('\n')
-    var start = process.hrtime()
+    lines.pop()
+
+    var bulkExpected = {}
+    var multiExpected = {}
+
+    for (var i = 0, l = lines.length; i < l; i++) {
+      var line = lines[i]
+      bulkExpected[line] = true
+      multiExpected[line] = true
+    }
+
+    // There are a couple of collisions at this probability.
+    bulkExpected['choledochotomy'] = false
+    bulkExpected['ensnarer'] = false
+    bulkExpected['renunciatory'] = false
+    bulkExpected['unboundless'] = false
+
+    // Insert lots of data.
+    var bulkStart = process.hrtime()
     bloomClient.bulk(filterName, lines, function (error, data) {
-      var elapsed = elapsedTime(start, 'Inserted ' + lines.length + ' items')
+      var elapsed = bloom.timer(bulkStart, 'Inserted ' + lines.length + ' items')
 
       // Totally arbitrary, but should be plenty of room on even a moderate laptop.
-      test.ok(elapsed < 1000, 'Bulk insert considered too slow')
-    })
+      test.ok(elapsed < 1000, 'Bulk set considered too slow')
 
-    bloomClient.drop(filterName, function() {
-      bloomClient.dispose()
-      test.done()
+      test.deepEqual(bulkExpected, data)
+
+      var multiStart = process.hrtime()
+      bloomClient.multi(filterName, lines, function (error, data) {
+        var elapsed = bloom.timer(multiStart, 'Retrieved ' + lines.length + ' items')
+
+        // Totally arbitrary, but should be plenty of room on even a moderate laptop.
+        test.ok(elapsed < 1000, 'Multi check considered too slow')
+        test.deepEqual(multiExpected, data)
+      })
+
+      bloomClient.drop(filterName, function() {
+        bloomClient.dispose()
+        test.done()
+      })
     })
   })
 }

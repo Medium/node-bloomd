@@ -24,9 +24,9 @@ var net = require('net'),
  * More info here: http://en.wikipedia.org/wiki/Bloom_filter
  *
  * TODO(jamie)
- *  + Safe Dropping
  *  + Retry and reconnect support
- *  + Maintain order of commands on a filter, even when using *safe.
+ *  + Handle list with prefix after safe commands.
+ *  + Safe creation after dropping
  *  + More Error checking
  *  ? StreamNoDelay configuration
  *  ? Rename setSafe command to set, and set to setUnchecked
@@ -46,6 +46,7 @@ function BloomClient(stream, options) {
   this.commandQueue = []
   this.offlineQueue = []
   this.commandsSent = 0
+  this.filterQueues = {}
 
   var self = this
 
@@ -64,7 +65,7 @@ function BloomClient(stream, options) {
   stream.on('end', function() {
     self._connectionClosed('end')
   })
-  
+
   stream.on('drain', function () {
   	self._drain()
   })
@@ -118,12 +119,22 @@ BloomClient.prototype.dispose = function () {
  * @param {Function} callback
  */
 BloomClient.prototype.create = function (filterName, options, callback) {
+  var self = this
   var args = [filterName]
   options = options || {}
   for (var key in options) {
     args.push(key + '=' + options[key])
   }
-  this._process('create', args, responseTypes.CONFIRMATION, callback)
+  this._process('create', filterName, args, responseTypes.CONFIRMATION, function (error, data) {
+
+    // First, run the callback.
+    if (callback) {
+      callback.call(callback, error, data)
+    }
+
+	// Then, clear the filter queue if we have one.
+    self._clearFilterQueue(filterName)
+  })
 }
 
 /**
@@ -138,7 +149,7 @@ BloomClient.prototype.create = function (filterName, options, callback) {
  */
 BloomClient.prototype.list = function (prefix, callback) {
   var args = prefix ? [prefix] : []
-  this._process('list', args, responseTypes.FILTER_LIST, callback)
+  this._process('list', null, args, responseTypes.FILTER_LIST, callback)
 }
 
 /**
@@ -150,7 +161,7 @@ BloomClient.prototype.list = function (prefix, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.drop = function (filterName, callback) {
-  this._process('drop', [filterName], responseTypes.DROP_CONFIRMATION, callback)
+  this._process('drop', filterName, [filterName], responseTypes.DROP_CONFIRMATION, callback)
 }
 
 /**
@@ -160,7 +171,7 @@ BloomClient.prototype.drop = function (filterName, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.close = function (filterName, callback) {
-  this._process('close', [filterName], responseTypes.CONFIRMATION, callback)
+  this._process('close', filterName, [filterName], responseTypes.CONFIRMATION, callback)
 }
 
 /**
@@ -170,7 +181,7 @@ BloomClient.prototype.close = function (filterName, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.clear = function (filterName, callback) {
-  this._process('clear', [filterName], responseTypes.CONFIRMATION, callback)
+  this._process('clear', filterName, [filterName], responseTypes.CONFIRMATION, callback)
 }
 
 /**
@@ -184,7 +195,7 @@ BloomClient.prototype.clear = function (filterName, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.check = function (filterName, key, callback) {
-  this._process('c', [filterName, key], responseTypes.BOOL, callback)
+  this._handle(this._buildCheckCommand(filterName, key, callback))
 }
 
 /**
@@ -198,8 +209,7 @@ BloomClient.prototype.check = function (filterName, key, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.multi = function (filterName, keys, callback) {
-  keys.unshift(filterName)
-  this._process('m', keys, responseTypes.BOOL_LIST, callback)
+  this._handle(this._buildMultiCommand(filterName, keys, callback))
 }
 
 /**
@@ -213,7 +223,7 @@ BloomClient.prototype.multi = function (filterName, keys, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.set = function (filterName, key, callback) {
-  this._process('s', [filterName, key], responseTypes.BOOL, callback)
+  this._handle(this._buildSetCommand(filterName, key, callback))
 }
 
 /**
@@ -228,8 +238,7 @@ BloomClient.prototype.set = function (filterName, key, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.bulk = function (filterName, keys, callback) {
-  keys.unshift(filterName)
-  this._process('b', keys, responseTypes.BOOL_LIST, callback)
+  this._handle(this._buildBulkCommand(filterName, keys, callback))
 }
 
 /**
@@ -241,7 +250,7 @@ BloomClient.prototype.bulk = function (filterName, keys, callback) {
  * @param {Function} callback
  */
 BloomClient.prototype.info = function (filterName, callback) {
-  this._process('info', [filterName], responseTypes.INFO, callback)
+  this._process('info', filterName, [filterName], responseTypes.INFO, callback)
 }
 
 /**
@@ -255,7 +264,42 @@ BloomClient.prototype.info = function (filterName, callback) {
  */
 BloomClient.prototype.flush = function (filterName, callback) {
   var args = filterName ? [filterName] : []
-  this._process('flush', args, responseTypes.CONFIRMATION, callback)
+  this._process('flush', filterName, args, responseTypes.CONFIRMATION, callback)
+}
+
+// 'Safe' Commands
+
+BloomClient.prototype._buildCheckCommand = function (filterName, key, callback) {
+  return this._buildCommand('check', filterName, [filterName, key], responseTypes.BOOL, callback)
+}
+
+BloomClient.prototype._buildMultiCommand = function (filterName, keys, callback) {
+  var args = keys.slice(0)
+  args.unshift(filterName)
+  return this._buildCommand('multi', filterName, args, responseTypes.BOOL_LIST, callback)
+}
+
+BloomClient.prototype._buildSetCommand = function (filterName, key, callback) {
+  return this._buildCommand('set', filterName, [filterName, key], responseTypes.BOOL, callback)
+}
+
+BloomClient.prototype._buildBulkCommand = function (filterName, keys, callback) {
+  var args = keys.slice(0)
+  args.unshift(filterName)
+  return this._buildCommand('bulk', filterName, args, responseTypes.BOOL_LIST, callback)
+}
+
+
+/**
+ * Safe versions of standard functions.
+ * They appear on the prototype as setSafe, checkSafe, bulkSafe etc.
+ *
+ * @see _makeSafe()
+ */
+var _safeCommands = ['set', 'check', 'bulk', 'multi']
+for (var i = 0, l = _safeCommands.length; i < l; i++) {
+  var commandName = _safeCommands[i]
+  BloomClient.prototype[commandName + 'Safe'] = _makeSafe(commandName)
 }
 
 // Extended Commands
@@ -268,6 +312,7 @@ BloomClient.prototype.flush = function (filterName, callback) {
  * @see BloomClient.prototype.bulk
  */
 BloomClient.prototype.bulkSet = BloomClient.prototype.bulk
+BloomClient.prototype.bulkSetSafe = BloomClient.prototype.bulkSafe
 
 /**
  * Alias for multi, for ease of remembering.
@@ -277,18 +322,7 @@ BloomClient.prototype.bulkSet = BloomClient.prototype.bulk
  * @see BloomClient.prototype.multi
  */
 BloomClient.prototype.multiCheck = BloomClient.prototype.multi
-
-/**
- * Safe versions of standard functions.
- * They appear on the prototype as setSafe, checkSafe, bulkSafe etc.
- *
- * @see _makeSafe()
- */
-var _safeCommands = ['set', 'check', 'bulk', 'multi', 'info']
-for (var i = 0, l = _safeCommands.length; i < l; i++) {
-  var command = _safeCommands[i]
-  BloomClient.prototype[command + 'Safe'] = _makeSafe(BloomClient.prototype[command])
-}
+BloomClient.prototype.multiCheckSafe = BloomClient.prototype.multiSafe
 
 // Private Methods
 
@@ -305,6 +339,10 @@ BloomClient.prototype._onReadable = function () {
     var command = this.commandQueue.shift(),
         error = null,
         data = null
+
+    if (this.options.debug) {
+      _timer(command.started, 'Response received for: ' + command.filterName + ' ' + command.arguments[0])
+    }
 
     try {
       switch (command.responseType) {
@@ -329,8 +367,7 @@ BloomClient.prototype._onReadable = function () {
           break
 
         case responseTypes.INFO:
-          // command.arguments[1] is the name of the filter, passed back for completeness.
-          data = ResponseParser.parseInfo(response, command.arguments[1])
+          data = ResponseParser.parseInfo(response, command.filterName)
           break
 
         default:
@@ -338,7 +375,7 @@ BloomClient.prototype._onReadable = function () {
           break
       }
     } catch (err) {
-      error = err
+      error = command.error || err
     }
 
     // Callbacks are optional.
@@ -390,7 +427,40 @@ BloomClient.prototype._connectionClosed = function (reason) {
 }
 
 /**
- * Prepares a command to be sent.  If the stream is ready to receive a command, 
+ * Convenience function to build and handle a command.
+ *
+ * @param {string} commandName
+ * @param {string} filterName
+ * @param {Array} args
+ * @param {string} responseType one of ResponseParser.responseTypes
+ * @param {Function} callback
+ */
+BloomClient.prototype._process = function (commandName, filterName, args, responseType, callback) {
+  this._handle(this._buildCommand(commandName, filterName, args, responseType, callback))
+}
+
+/**
+ * Prepares a command from the supplied arguments.
+ *
+ * @param {string} commandName
+ * @param {string} filterName
+ * @param {Array} args
+ * @param {string} responseType one of ResponseParser.responseTypes
+ * @param {Function} callback
+ */
+BloomClient.prototype._buildCommand = function (commandName, filterName, args, responseType, callback) {
+  args = args || []
+  args.unshift(commandName)
+  return {
+    filterName: filterName,
+    arguments: args,
+    responseType: responseType,
+    callback: callback
+  }
+}
+
+/**
+ * Prepares a command to be sent.  If the stream is ready to receive a command,
  * sends it immediately, otherwise queues it up to be sent when the stream is ready.
  *
  * @param {string} commandName
@@ -398,15 +468,19 @@ BloomClient.prototype._connectionClosed = function (reason) {
  * @param {string} responseType one of ResponseParser.responseTypes
  * @param {Function} callback
  */
-BloomClient.prototype._process = function(commandName, args, responseType, callback) {
-  args = args || []
-  args.unshift(commandName)
-  var command = {
-    arguments: args,
-    responseType: responseType,
-    callback: callback
+BloomClient.prototype._handle = function (command, clearing) {
+  var commandName = command.arguments[0]
+  var filterName = command.filterName
+
+  if (filterName && this.filterQueues[filterName] && ('create' !== commandName) && !clearing) {
+    // There are other commands outstanding for this filter, so hold this one until they are processed.
+    if (this.options.debug) {
+      console.log("Holding command in filter sub-queue:", commandName, filterName)
+    }
+    this.filterQueues[filterName].push(command)
+    return
   }
-  
+
   if (this.ready) {
     if (this.options.debug) {
       console.log("Processing:", commandName)
@@ -417,7 +491,8 @@ BloomClient.prototype._process = function(commandName, args, responseType, callb
       console.log("Buffering command:", commandName)
     }
     this.offlineQueue.push(command)
-  }  
+  }
+
 }
 
 /**
@@ -425,16 +500,17 @@ BloomClient.prototype._process = function(commandName, args, responseType, callb
  * onto the command queue for processing when the response arrives.
  *
  * Returns a boolean indicating sent status.
- * 
+ *
  * @param {Object} command
  * @return {boolean}
  */
 BloomClient.prototype._send = function (command) {
-  var line = command.arguments.join(' ') + '\n'  
+  var line = command.arguments.join(' ') + '\n'
   var processedEntirely = this.stream.write(line)
 
   if (this.options.debug) {
     console.log("Sent:", command.arguments[0])
+    command.started = process.hrtime()
   }
 
   this.commandsSent++
@@ -446,7 +522,7 @@ BloomClient.prototype._send = function (command) {
     }
     this.ready = false
   }
-  
+
   return processedEntirely
 }
 
@@ -461,7 +537,7 @@ BloomClient.prototype._drain = function () {
     if (this.options.debug) {
       console.log("Sending buffered command:", command.arguments[0])
     }
-    
+
     if (!this._send(command)) {
       // Buffer was filled from this command.  Wait some more.
       return
@@ -471,27 +547,54 @@ BloomClient.prototype._drain = function () {
   this.emit('ready')
 }
 
+/**
+ * Queues for processing all those commands which were held due to
+ * a 'safe' method being invoked.
+ *
+ * @param {string} filterName
+ */
+BloomClient.prototype._clearFilterQueue = function (filterName) {
+  var filterQueue = this.filterQueues[filterName]
+  if (!filterQueue) {
+    return
+  }
+
+  if (this.options.debug) {
+    console.log('Clearing filter queue:', filterName)
+  }
+
+  while (filterQueue.length) {
+    this._handle(filterQueue.shift(), true)
+  }
+
+  delete this.filterQueues[filterName]
+}
+
 // Helper Functions
 
 /**
- * Returns a function which is a 'safe' version of the supplied command. That is, if
+ * Returns a function which is a 'safe' version of the command with the supplied name. That is, if
  * the filter doesn't exist when the command is run, attempts to automatically create
  * the filter and then re-run the command, transparently to the client.
  *
- * If there is an error in the creation step, this function returns filter creation
+ * If there is an error in the creation step, the callback will receive the filter creation
  * failure, not the original 'filter not found', to help track down why the creation
  * would be failing.
  *
- * @param {Function} command
+ * @param {string} command
  * @return {Function}
  */
-function _makeSafe(command) {
+function _makeSafe(commandName) {
+  var commandBuilder = BloomClient.prototype['_build' + commandName[0].toUpperCase()  + commandName.slice(1) + 'Command']
+
   return function() {
     // This is a function like setSafe()
     var self = this
     var args = Array.prototype.slice.call(arguments, 0)
     var filterName = args[0]
     var createOptions = {}
+
+	// Suppports optional createOptions as a final parameter.
     var callback
     if (args[args.length - 1] instanceof Function) {
       callback = args.pop()
@@ -499,29 +602,62 @@ function _makeSafe(command) {
       createOptions = args.pop()
       callback = args.pop()
     }
-    args.push(function(originalError, originalData) {
+
+    // Create a separate copy of these arguments, so they don't get munged by later commands
+    // which modify them.
+    var originalArgs = args.slice(0)
+    originalArgs.push(callback)
+
+    args.push(function (originalError, originalData) {
       // This is the callback which catches the response to the original command
       // (e.g. safe, check, bulk, multi etc.)
       if (originalError && ('Filter does not exist' === originalError.message)) {
-        // Filter didn't exist, try and create it.
+        // Try to create the filter.  The create method will clear the queue when it completes.
         self.create(filterName, createOptions, function (createError, createData) {
-          // This is callback which catches the response to the create command.
-          if (createError) {
-            // Creation of the filter failed. Run the original callback with this failure.
-            callback.call(callback, createError, createData)
-          } else {
-            // Creation succeeded, re-run the command.
-            command.apply(self, args)
+          // This is the callback which catches the response to the create command.
+          // In it, we tell it to run the command which triggered this creation.
+          var command = commandBuilder.apply(self, originalArgs)
+
+		  // If the creation fails, the triggering action will also fail.
+		  // Store the creation error so we can give useful feedback for why the triggering
+		  // action wasn't successful, despite it being 'safe'.
+		  if (createError) {
+            command.error = createError
           }
+
+	      self._handle(command, true)
         })
       } else {
         // The filter exists, so run the original callback.
         callback.call(callback, originalError, originalData)
+
+        self._clearFilterQueue(filterName)
       }
     })
-    // Execute the requested command.
-    command.apply(self, args)
+
+    this._handle(commandBuilder.apply(self, args))
+
+    // Create a queue for this filter, so that subsequent commands to this filter are
+    // buffered until it is created.
+    if (!this.filterQueues[filterName]) {
+      this.filterQueues[filterName] = []
+    }
   }
+}
+
+/**
+ * Helper function to time performance in ms.
+ *
+ * @param {Array} since A previous call to process.hrtime()
+ * @param {string} message an optional message
+ * @return {number}
+ */
+function _timer(since, message) {
+  var interval = process.hrtime(since)
+  var elapsed = (interval[0] * 1000) + (interval[1] / 1000000)
+  message = message ? message + ': ' : ''
+  console.log(message + elapsed.toFixed(3) + 'ms')
+  return elapsed
 }
 
 // Exports
@@ -537,7 +673,8 @@ exports.createClient = function (options) {
   return new BloomClient(netClient, options)
 }
 
+exports.timer = _timer
+
 exports.print = function (error, data) {
     console.log(data)
 }
-
