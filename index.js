@@ -1,3 +1,5 @@
+// Copyright 2013 The Obvious Corporation
+
 var net = require('net'),
     events = require('events'),
     stream = require('stream'),
@@ -24,12 +26,10 @@ var net = require('net'),
  * More info here: http://en.wikipedia.org/wiki/Bloom_filter
  *
  * TODO(jamie)
- *  + Retry and reconnect support
  *  + Handle list with prefix after safe commands.
  *  + Safe creation after dropping
  *  + More Error checking
  *  ? StreamNoDelay configuration
- *  ? Rename setSafe command to set, and set to setUnchecked
  *
  * Options are:
  *
@@ -39,10 +39,20 @@ var net = require('net'),
  * @param {Object} options
  */
 function BloomClient(stream, options) {
-  this.stream = stream
   this.options = options
   this.responseParser = new ResponseParser(this)
-  this.ready = false
+
+  // Connection handling
+  this.disposed = false
+  this.stream = stream
+  this.connectionAttempts = 1
+  this.maxConnectionAttempts = options.maxConnectionAttempts || 0
+  this.reconnectDelay = options.reconnectDelay || 160
+  this.reconnector = null
+
+  // Queue handling
+  this.unavailable = false
+  this.buffering = true
   this.commandQueue = []
   this.offlineQueue = []
   this.commandsSent = 0
@@ -84,18 +94,44 @@ util.inherits(BloomClient, events.EventEmitter)
 // API
 
 /**
- * Whether or not the client can accept commands.
+ * Whether or not the client will process commands immediately.
  *
  * @return {bool}
  */
-BloomClient.prototype.isReady = function() {
-  return this.ready
+BloomClient.prototype.isBuffering = function() {
+  return this.buffering
+}
+
+/**
+ * Allows client code to request a reconnection.
+ *
+ * node-bloomd automatically attempts to connect or reconnect to the bloomd
+ * server. However, if a connectTimeout option is specified, node-bloomd
+ * eventually gives up. This method allows long running processes to request
+ * a reconnection in that eventuality.
+ *
+ * This command is ignored unless the client is marked unavailable, because if
+ * it is not marked unavailable, we are still going through the standard retry
+ * progression.
+ *
+ */
+BloomClient.prototype.reconnect = function() {
+  if (!this.unavailable) {
+    return
+  }
+
+  // Reset the critical data.
+  this.unavailable = false
+  this.totalReconnectionTime = 0
+  this.connectionAttempts = 0
+  this._reconnect()
 }
 
 /**
  * Closes the connection to BloomD
  */
 BloomClient.prototype.dispose = function () {
+  this.disposed = true
   this.stream.end()
 }
 
@@ -387,13 +423,13 @@ BloomClient.prototype._onReadable = function () {
 
 /**
  * Fires when the underlying stream connects.
- *
- * TODO(jamie) Support queuing of commands before ready, and then flush them here.
  */
 BloomClient.prototype._onConnect = function () {
   if (this.options.debug) {
     console.log('Connected to ' + this.options.host + ':' + this.options.port)
   }
+
+  this.unavailable = false
 
   this.emit('connected')
   this._drain()
@@ -409,20 +445,109 @@ BloomClient.prototype._onError = function (msg) {
   }
 
   this.connected = false
-  this.emit('error', new Error(message))
   this._connectionClosed('error')
 }
 
 /**
  * Fires when a connection is closed, either through error, or naturally.
  *
- * TODO(jamie) Support reconnects, and flushing of queue for natural closure.
- *
  * @param {string} reason
  */
 BloomClient.prototype._connectionClosed = function (reason) {
   if (this.options.debug) {
     console.warn('Connection closed (' + reason + ')')
+  }
+  this.buffering = true
+
+  this.emit('disconnected')
+  this._reconnect()
+}
+
+/**
+ * Attempts to reconnect to the underlying stream.
+ *
+ *
+ */
+BloomClient.prototype._reconnect = function () {
+  if (this.reconnector || this.unavailable) {
+    // We explicitly disposed the client, or we've exhausted our
+    // attempts to connect, so no need to reconnect.
+    return
+  }
+
+  var self = this
+
+  if (this.disposed || (this.maxConnectionAttempts && (this.connectionAttempts >= this.maxConnectionAttempts))) {
+    // We've hits the max number of connection attempts, or we have been disposed.
+    // Mark the client as unavailable, which will also reject the various queues.
+    if (this.options.debug) {
+      console.log('Bloomd is unavailable.')
+    }
+    this._unavailable()
+    return
+  }
+
+  // Simple linear back-off. Defaults would give ms delays of [160, 320, 480, ...]
+  var reconnectDelay = this.connectionAttempts * this.reconnectDelay
+
+  this.connectionAttempts++
+  this.reconnector = setTimeout(function () {
+    if (self.options.debug) {
+      console.log('Connecting: attempt (' + self.connectionAttempts + ')')
+    }
+    if (!self.disposed) {
+      self.stream.connect(self.options.port, self.options.host)
+    }
+    self.reconnector = null
+  }, reconnectDelay)
+
+}
+
+/**
+ * Marks the client as unavailable.
+ *
+ * An unavailable client will fail all commands sent to it immediately, as well
+ * as fail all commands that have been requested but not responded to.
+ */
+BloomClient.prototype._unavailable = function() {
+  var command
+  this.unavailable = true
+
+  // Clear the command queue.
+  while (command = this.commandQueue.shift()) {
+    this._rejectCommand(command)
+  }
+
+  while (command = this.offlineQueue.shift()) {
+    this._rejectCommand(command)
+  }
+
+  for (var filterName in this.filterQueues) {
+    var queue = this.filterQueues[filterName]
+    while (command = queue.shift()) {
+      this._rejectCommand(command)
+    }
+  }
+
+  this.filterQueues = {}
+
+  // Announce that we are unavailable.
+  this.emit('unavailable')
+}
+
+/**
+ * Rejects a command that cannot be processed.
+ *
+ * If a callback was specified, it will be called with an error.
+ *
+ * @param {Object} command
+ */
+BloomClient.prototype._rejectCommand = function (command) {
+  if (this.options.debug) {
+    console.log('Rejecting command:', command.arguments[0], command.filterName)
+  }
+  if (command.callback) {
+    command.callback(new Error('Bloomd is unavailable'), null)
   }
 }
 
@@ -472,27 +597,31 @@ BloomClient.prototype._handle = function (command, clearing) {
   var commandName = command.arguments[0]
   var filterName = command.filterName
 
+  if (this.unavailable) {
+    this._rejectCommand(command)
+    return
+  }
+
   if (filterName && this.filterQueues[filterName] && ('create' !== commandName) && !clearing) {
     // There are other commands outstanding for this filter, so hold this one until they are processed.
     if (this.options.debug) {
-      console.log("Holding command in filter sub-queue:", commandName, filterName)
+      console.log('Holding command in filter sub-queue:', commandName, filterName)
     }
     this.filterQueues[filterName].push(command)
     return
   }
 
-  if (this.ready) {
+  if (this.buffering) {
     if (this.options.debug) {
-      console.log("Processing:", commandName)
-    }
-    this._send(command)
-  } else {
-    if (this.options.debug) {
-      console.log("Buffering command:", commandName)
+      console.log('Buffering command:', commandName)
     }
     this.offlineQueue.push(command)
+  } else {
+    if (this.options.debug) {
+      console.log('Processing:', commandName)
+    }
+    this._send(command)
   }
-
 }
 
 /**
@@ -509,7 +638,7 @@ BloomClient.prototype._send = function (command) {
   var processedEntirely = this.stream.write(line)
 
   if (this.options.debug) {
-    console.log("Sent:", command.arguments[0])
+    console.log('Sent:', command.arguments[0])
     command.started = process.hrtime()
   }
 
@@ -518,9 +647,9 @@ BloomClient.prototype._send = function (command) {
 
   if (!processedEntirely) {
     if (this.options.debug) {
-      console.log("Waiting after full buffer:", command.arguments[0])
+      console.log('Waiting after full buffer:', command.arguments[0])
     }
-    this.ready = false
+    this.buffering = true
   }
 
   return processedEntirely
@@ -535,7 +664,7 @@ BloomClient.prototype._drain = function () {
   while (this.offlineQueue.length) {
     var command = this.offlineQueue.shift()
     if (this.options.debug) {
-      console.log("Sending buffered command:", command.arguments[0])
+      console.log('Sending buffered command:', command.arguments[0])
     }
 
     if (!this._send(command)) {
@@ -543,8 +672,8 @@ BloomClient.prototype._drain = function () {
       return
     }
   }
-  this.ready = true
-  this.emit('ready')
+  this.buffering = false
+  this.emit('drain')
 }
 
 /**
@@ -618,14 +747,14 @@ function _makeSafe(commandName) {
           // In it, we tell it to run the command which triggered this creation.
           var command = commandBuilder.apply(self, originalArgs)
 
-		  // If the creation fails, the triggering action will also fail.
-		  // Store the creation error so we can give useful feedback for why the triggering
-		  // action wasn't successful, despite it being 'safe'.
-		  if (createError) {
+          // If the creation fails, the triggering action will also fail.
+          // Store the creation error so we can give useful feedback for why the triggering
+          // action wasn't successful, despite it being 'safe'.
+          if (createError) {
             command.error = createError
           }
 
-	      self._handle(command, true)
+          self._handle(command, true)
         })
       } else {
         // The filter exists, so run the original callback.
@@ -674,7 +803,3 @@ exports.createClient = function (options) {
 }
 
 exports.timer = _timer
-
-exports.print = function (error, data) {
-    console.log(data)
-}

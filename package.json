@@ -1,7 +1,7 @@
 {
     "name": "bloomd"
   , "description": "NodeJS Driver for BloomD"
-  , "version": "0.2.0"
+  , "version": "0.2.1"
   , "homepage": "https://github.com/obvious/node-bloomd"
   , "authors": [
     "Jamie Talbot <jamie@jamietalbot.com> (https://github.com/majelbstoat)"
@@ -18,7 +18,8 @@
   , "dependencies": {
   }
   , "devDependencies": {
-        "nodeunit": "0.7.4"
+        "nodeunit": "0.7.4",
+        "sleep": "1.1.1"
     }
   , "scripts": {
       "test": "./node_modules/nodeunit/bin/nodeunit test"
