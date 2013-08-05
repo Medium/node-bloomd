@@ -34,21 +34,36 @@ Create a client, then call bloomd commands directly on it. A simple example:
       client = bloomd.createClient()
 
   client.on('error', function (err) {
-      console.log('Error:' + err)
+    console.log('Error:' + err)
   })
 
+  function printer(error, data) {
+    console.log(data)
+  }
+
   client.list(null, bloomd.print)
-  client.create('newFilter', bloomd.print)
+  client.create('newFilter', printer)
   client.info('newFilter', bloomd.print)
-  client.check('newFilter', 'monkey', bloomd.print)
-  client.set('newFilter', 'monkey', bloomd.print)
-  client.check('newFilter', 'monkey', bloomd.print)
-  client.bulk('newFilter', ['monkey', 'magic', 'muppet'], bloomd.print)
-  client.multi('newFilter', ['monkey', 'magic', 'muppet'], bloomd.print)
+  client.check('newFilter', 'monkey', printer) 
+  client.set('newFilter', 'monkey', printer)
+  client.check('newFilter', 'monkey', printer) 
+  client.bulk('newFilter', ['monkey', 'magic', 'muppet'], printer) 
+  client.multi('newFilter', ['monkey', 'magic', 'muppet'], printer) 
   client.info('newFilter', bloomd.print)
-  client.drop('newFilter', bloomd.print)
-  client.dispose()
+  client.drop('newFilter', printer) 
+  client.dispose() 
 ```
+
+Client Options
+--------------
+
+A number of config options are available for the client:
+
+* ```host [127.0.0.1]```: The host of bloomd to connect to.
+* ```port [8673]```: The port to connect on.
+* ```debug [false]```: Outputs debug information to the log.
+* ```reconnectDelay [160]```: The base amount of time in ms to wait between reconnection attempts. This number is multiplied by the current count of reconnection attempts to give a measure of backoff.
+* ```maxConnectionAttempts [0]```: The amount of times to try to get a connection to bloomd, after which the client will declare itself unavailable. 0 means no limit.
 
 Memorable Commands
 ------------------
@@ -114,9 +129,7 @@ Finally, 'safe' is a terrible designation, and I welcome suggestions for a bette
 Still To Do
 -----------
 
-* Retry and reconnect support.
 * More Error checking.
-* Additional tests.
 * Instrumentation and optimisation.
 * Better documentation.
 * Auto-retry of filter creation when failing due to the filter having recently been dropped.
@@ -138,7 +151,7 @@ Author
 License
 -------
 
-Copyright 2013 [Medium](https://medium.com)
+Copyright 2013 [The Obvious Corporation](https://medium.com)
 
 Licensed under Apache License Version 2.0.  Details in the attached LICENSE
 file.

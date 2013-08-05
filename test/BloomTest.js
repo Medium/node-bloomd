@@ -1,19 +1,126 @@
+// Copyright 2013 The Obvious Corporation
+
 var bloom = require('../index'),
   fs = require('fs'),
-  assert = require('assert')
+  assert = require('assert'),
+  spawn = require('child_process').spawn,
+  sleep = require('sleep').sleep,
+  bloomd
 
-// Delay in ms that we should wait after doing a drop command before issuing
-// a create command to the same filter name, due to bloomd's limitations.
-// If tests are failing, try increasing this.
+/**
+ * Delay in ms that we should wait after doing a drop command before issuing
+ * a create command to the same filter name, due to bloomd's limitations.
+ * If tests are failing, try increasing this.
+ */
 var DROP_THEN_CREATE_DELAY_MS = 200
+
+/**
+ * Delay in seconds that we should wait after starting and stopping the bloomd
+ * server to make sure it is ready.
+ */
+var SERVER_START_STOP_TIME = 1
+
+/**
+ * Starts bloomd
+ */
+function _startServer() {
+  bloomd = spawn('bloomd')
+  sleep(SERVER_START_STOP_TIME)
+}
+
+/**
+ * Stops bloomd
+ */
+function _stopServer() {
+  bloomd.kill()
+  sleep(SERVER_START_STOP_TIME)
+}
 
 /**
  * We use different named filters for each, as bloomd does not allow for the creation
  * of a filter while it is deleting one of the same name, and this library doesn't
  * currently handle this case.
  *
- * TODO(jamie) Find a way to generalise the boilerplate.
+ * These tests work by starting and stopping bloomd a couple of times.
+ * It assumes 'bloomd' is an executable on the system.
+ *
+ * Starting and stopping the server throughout the tests introduces a dependency
+ * on the ordering of tests, and makes them potentially non-deterministic. This isn't
+ * necessarily best practice but it allows us to test the server going away, and
+ * sending commands before the server becomes available.
  */
+
+/**
+ * Tests that the client can connect to a bloomd instance which becomes
+ * available after the client starts up.
+ */
+exports.reconnectsOnConnectionFailure = function (test) {
+  var filterName = 'reconnects_on_failure'
+  var bloomClient = bloom.createClient()
+
+  bloomClient.setSafe(filterName, 'monkey', function(error, data) {
+    test.equals(data, true)
+  })
+
+  bloomClient.check(filterName, 'monkey', function (error, data) {
+    test.equals(data, true)
+  })
+
+  bloomClient.drop(filterName, function (error, data) {
+    bloomClient.dispose()
+
+    // Set, Create, Set, Check, Drop
+    test.equals(5, bloomClient.commandsSent)
+    test.done()
+  })
+
+  // Start the server only after all the events have been queued.
+  _startServer()
+}
+
+/**
+ * Tests that an unavailable client rejects both queued commands
+ * and ones issued after the fact.
+ */
+exports.unavailableClientRejectsQueuedAndNewCommands = function (test) {
+  var filterName = 'unavailable_client_rejection'
+  var bloomClient = bloom.createClient({maxConnectionAttempts: 1})
+
+  _stopServer()
+
+  bloomClient.create(filterName, {}, function (error, data) {
+    test.equals('Bloomd is unavailable', error.message, 'Command should have been rejected')
+  })
+
+  // Wait until we get the unavailable signal, then try a command.
+  bloomClient.on('unavailable', function() {
+    bloomClient.set(filterName, 'monkey', function (error, data) {
+      test.equals('Bloomd is unavailable', error.message, 'Command should have been rejected')
+      test.done()
+      _startServer()
+    })
+  })
+}
+
+/**
+ * Tests that disposing a client doesn't reconnect
+ */
+exports.disposedClientDoesNotReconnect = function (test) {
+  var filterName = 'disposed_client_reconnected'
+  var bloomClient = bloom.createClient()
+
+  _stopServer()
+
+  bloomClient.create(filterName, {}, function (error, data) {
+    test.equals('Bloomd is unavailable', error.message, 'Command should have been rejected')
+    test.done()
+    _startServer()
+  })
+
+  bloomClient.dispose()
+}
+
+// Tests after this point will run with bloomd available.
 
 /**
  * Tests that calling setSafe on a filter actually calls the original
@@ -70,8 +177,8 @@ exports.setAndCreateTestFilterDoesNotExist = function (test) {
         // This is why promises are good.
         bloomClient.drop(filterName, function() {
           // Drop, Set, Create, Set, Drop
-          test.equals(5, bloomClient.commandsSent)
           bloomClient.dispose()
+          test.equals(5, bloomClient.commandsSent)
           test.done()
         })
       })
@@ -101,8 +208,8 @@ exports.checkAfterSetSafe = function (test) {
 
       bloomClient.drop(filterName, function() {
         // Drop, Set, Create, Set, Check, Drop
-        test.equals(6, bloomClient.commandsSent)
         bloomClient.dispose()
+        test.equals(6, bloomClient.commandsSent)
         test.done()
       })
     }, DROP_THEN_CREATE_DELAY_MS)
@@ -159,8 +266,8 @@ exports.interleavedSafeNonSafe = function (test) {
 
       bloomClient.drop(filterName, function() {
         // Drop, Multi, Create, Multi, Bulk, Multi, Bulk, Multi, Drop
-        test.equals(9, bloomClient.commandsSent)
         bloomClient.dispose()
+        test.equals(9, bloomClient.commandsSent)
         test.done()
       })
     }, DROP_THEN_CREATE_DELAY_MS)
@@ -301,11 +408,11 @@ exports.canonicalTest = function (test) {
   var filterName = 'canonical_test'
   var bloomClient = bloom.createClient()
 
-  // Create a filter.
   bloomClient.list(null, function(error, data) {
-    test.equals(data.length, 0, 'We had a list, somehow.')
+    test.equals(data.length, 0, 'We have a list, somehow')
   })
 
+  // Create a filter.
   bloomClient.create(filterName, {}, function (error, data) {
     test.equals(data, true, 'Failed to create filter')
   })
@@ -361,4 +468,12 @@ exports.canonicalTest = function (test) {
     test.done()
   })
 
+}
+
+/**
+ * Dummy test to kill the server and finish up.
+ */
+exports.stopServer = function (test) {
+  _stopServer()
+  test.done()
 }
