@@ -161,14 +161,14 @@ BloomClient.prototype.create = function (filterName, options, callback) {
   for (var key in options) {
     args.push(key + '=' + options[key])
   }
-  this._process('create', filterName, args, responseTypes.CONFIRMATION, function (error, data) {
+  this._process('create', filterName, args, responseTypes.CREATE_CONFIRMATION, function (error, data) {
 
     // First, run the callback.
     if (callback) {
       callback.call(callback, error, data)
     }
 
-	// Then, clear the filter queue if we have one.
+	  // Then, clear the filter queue if we have one.
     self._clearFilterQueue(filterName)
   })
 }
@@ -396,6 +396,10 @@ BloomClient.prototype._onReadable = function () {
 
         case responseTypes.CONFIRMATION:
           data = ResponseParser.parseConfirmation(response)
+          break
+
+        case responseTypes.CREATE_CONFIRMATION:
+          data = ResponseParser.parseCreateConfirmation(response)
           break
 
        case responseTypes.DROP_CONFIRMATION:
