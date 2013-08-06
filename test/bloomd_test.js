@@ -25,6 +25,12 @@ var SERVER_START_STOP_TIME = 1
  */
 function _startServer() {
   bloomd = spawn('bloomd')
+  bloomd.on('close', function (code) {
+    if (code) {
+      console.log('Bloomd could not start. Is it already running?')
+      throw new Error()
+    }
+  })
   sleep(SERVER_START_STOP_TIME)
 }
 
@@ -88,6 +94,11 @@ exports.unavailableClientRejectsQueuedAndNewCommands = function (test) {
 
   _stopServer()
 
+  bloomClient.on('connected', function () {
+    test.ok(false, 'We should not have been able to connect.')
+    test.done()
+  })
+
   bloomClient.create(filterName, {}, function (error, data) {
     test.equals('Bloomd is unavailable', error.message, 'Command should have been rejected')
   })
@@ -120,7 +131,7 @@ exports.disposedClientDoesNotReconnect = function (test) {
   bloomClient.dispose()
 }
 
-// Tests after this point will run with bloomd available.
+// Server Is Available
 
 /**
  * Tests that calling setSafe on a filter actually calls the original
@@ -149,6 +160,34 @@ exports.setAndCreateTestFilterExists = function (test) {
     bloomClient.dispose()
     test.equals(called, true, 'The original callback was not called')
     test.done()
+  })
+}
+
+/**
+ * Test that creating a filter when it already exists doesn't throw an
+ * error. Technically the create options could be different, but we don't
+ * worry about that. It's unclear what the correct resolution would be
+ * and we need to support this so that *safe() commands operating on the
+ * same filter but run from different clients don't cause failure on
+ * a race.
+ */
+exports.consecutiveCreateCommandsDoNotFail = function (test) {
+  var filterName = 'consecutive_creates'
+  var bloomClient = bloom.createClient()
+
+  bloomClient.drop(filterName, function (error, data) {
+    bloomClient.create(filterName, {}, function (error, data) {
+      test.equals(data, true, 'First creation failed')
+    })
+
+    bloomClient.create(filterName, {}, function (error, data) {
+      test.equals(data, true, 'Second creation failed')
+    })
+
+    bloomClient.drop(filterName, function (error, data) {
+      bloomClient.dispose()
+      test.done()
+    })
   })
 }
 
