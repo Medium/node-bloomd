@@ -77,7 +77,7 @@ function BloomClient(stream, options) {
   })
 
   stream.on('drain', function () {
-  	self._drain()
+    self._drain()
   })
 
   this.stream.pipe(this.responseParser)
@@ -168,7 +168,7 @@ BloomClient.prototype.create = function (filterName, options, callback) {
       callback.call(callback, error, data)
     }
 
-	  // Then, clear the filter queue if we have one.
+    // Then, clear the filter queue if we have one.
     self._clearFilterQueue(filterName)
   })
 }
@@ -504,6 +504,7 @@ BloomClient.prototype._reconnect = function () {
     }
     self.reconnector = null
   }, reconnectDelay)
+  this.reconnector.unref()
 
 }
 
@@ -727,7 +728,7 @@ function _makeSafe(commandName) {
     var filterName = args[0]
     var createOptions = {}
 
-	// Suppports optional createOptions as a final parameter.
+    // Supports optional createOptions as a final parameter.
     var callback
     if (args[args.length - 1] instanceof Function) {
       callback = args.pop()
