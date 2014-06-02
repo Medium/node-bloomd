@@ -28,12 +28,16 @@ var net = require('net'),
  * TODO(jamie)
  *  + Handle list with prefix after safe commands.
  *  + Safe creation after dropping
- *  + More Error checking
+ *  + Mock service for better testing.
  *  ? StreamNoDelay configuration
  *
  * Options are:
  *
- * debug: [false] Emit debug information
+ * debug                 [false] Emit debug information
+ * maxConnectionAttempts [0]     The number of times to try reconnecting. 0 for infinite.
+ * reconnectDelay        [160]   The additional time in ms between each reconnect retry.
+ * maxErrors             [0]     The number of internal errors received from bloomd after which time
+ *                                 the service is marked as unavailable. 0 for infinite.
  *
  * @param {Object} stream
  * @param {Object} options
@@ -57,6 +61,10 @@ function BloomClient(stream, options) {
   this.offlineQueue = []
   this.commandsSent = 0
   this.filterQueues = {}
+
+  // Error handling
+  this.maxErrors = options.maxErrors || 0
+  this.errors = 0
 
   var self = this
 
@@ -106,8 +114,9 @@ BloomClient.prototype.isBuffering = function() {
  * Allows client code to request a reconnection.
  *
  * node-bloomd automatically attempts to connect or reconnect to the bloomd
- * server. However, if a connectTimeout option is specified, node-bloomd
- * eventually gives up. This method allows long running processes to request
+ * server. However, if a connectTimeout option is specified, or if the
+ * maximum number of internal errors is reached, node-bloomd eventually
+ * gives up. This method allows long running processes to request
  * a reconnection in that eventuality.
  *
  * This command is ignored unless the client is marked unavailable, because if
@@ -124,6 +133,7 @@ BloomClient.prototype.reconnect = function() {
   this.unavailable = false
   this.totalReconnectionTime = 0
   this.connectionAttempts = 0
+  this.errors = 0
   this._reconnect()
 }
 
@@ -144,7 +154,7 @@ BloomClient.prototype.dispose = function () {
  * a bloomd server with default configuration. Check your server for
  * specifics.
  *
- * prob      [0.0001]  - The desired probability of false positives.
+ * prob      [0.0001] - The desired probability of false positives.
  * capacity  [100000] - The required initial capacity of the filter.
  * in_memory [0]      - Whether the filter should exist only in memory, with no disk backing.
  *
@@ -380,46 +390,58 @@ BloomClient.prototype._onReadable = function () {
       _timer(command.started, 'Response received for: ' + command.filterName + ' ' + command.arguments[0])
     }
 
-    try {
-      switch (command.responseType) {
-        case responseTypes.BOOL:
-          data = ResponseParser.parseBool(response)
-          break
-
-        case responseTypes.BOOL_LIST:
-          data = ResponseParser.parseBoolList(response, command.arguments.slice(2))
-          break
-
-        case responseTypes.FILTER_LIST:
-          data = ResponseParser.parseFilterList(response)
-          break
-
-        case responseTypes.CONFIRMATION:
-          data = ResponseParser.parseConfirmation(response)
-          break
-
-        case responseTypes.CREATE_CONFIRMATION:
-          data = ResponseParser.parseCreateConfirmation(response)
-          break
-
-       case responseTypes.DROP_CONFIRMATION:
-          data = ResponseParser.parseDropConfirmation(response)
-          break
-
-        case responseTypes.INFO:
-          data = ResponseParser.parseInfo(response, command.filterName)
-          break
-
-        default:
-          throw new Error('Unknown response type: ' + command.responseType)
-          break
+    if (ResponseParser.isError(response)) {
+      this.errors++
+      if (this.maxErrors && (this.errors >= this.maxErrors)) {
+        return this._unavailable()
       }
-    } catch (err) {
-      error = command.error || err
+      error = new Error('Bloomd Internal Error')
+    } else {
+      if (this.errors > 0) {
+        this.errors--
+      }
+      try {
+        switch (command.responseType) {
+          case responseTypes.BOOL:
+            data = ResponseParser.parseBool(response)
+            break
+
+          case responseTypes.BOOL_LIST:
+            data = ResponseParser.parseBoolList(response, command.arguments.slice(2))
+            break
+
+          case responseTypes.FILTER_LIST:
+            data = ResponseParser.parseFilterList(response)
+            break
+
+          case responseTypes.CONFIRMATION:
+            data = ResponseParser.parseConfirmation(response)
+            break
+
+          case responseTypes.CREATE_CONFIRMATION:
+            data = ResponseParser.parseCreateConfirmation(response)
+            break
+
+         case responseTypes.DROP_CONFIRMATION:
+            data = ResponseParser.parseDropConfirmation(response)
+            break
+
+          case responseTypes.INFO:
+            data = ResponseParser.parseInfo(response, command.filterName)
+            break
+
+          default:
+            throw new Error('Unknown response type: ' + command.responseType)
+            break
+        }
+      } catch (err) {
+        error = command.error || err
+      }
     }
 
     // Callbacks are optional.
     if (command.callback) {
+      error.command = command.arguments
       command.callback(error, data)
     }
   }
@@ -469,8 +491,6 @@ BloomClient.prototype._connectionClosed = function (reason) {
 
 /**
  * Attempts to reconnect to the underlying stream.
- *
- *
  */
 BloomClient.prototype._reconnect = function () {
   if (this.reconnector || this.unavailable) {
@@ -505,7 +525,6 @@ BloomClient.prototype._reconnect = function () {
     self.reconnector = null
   }, reconnectDelay)
   this.reconnector.unref()
-
 }
 
 /**
@@ -593,10 +612,8 @@ BloomClient.prototype._buildCommand = function (commandName, filterName, args, r
  * Prepares a command to be sent.  If the stream is ready to receive a command,
  * sends it immediately, otherwise queues it up to be sent when the stream is ready.
  *
- * @param {string} commandName
- * @param {Array} args
- * @param {string} responseType one of ResponseParser.responseTypes
- * @param {Function} callback
+ * @param {Object} command
+ * @param {boolean} clearing
  */
 BloomClient.prototype._handle = function (command, clearing) {
   var commandName = command.arguments[0]
