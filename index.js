@@ -441,7 +441,9 @@ BloomClient.prototype._onReadable = function () {
 
     // Callbacks are optional.
     if (command.callback) {
-      error.command = command.arguments
+      if (error) {
+        error.command = command.arguments
+      }
       command.callback(error, data)
     }
   }
