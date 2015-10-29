@@ -2,9 +2,8 @@
 
 var net = require('net'),
     events = require('events'),
-    stream = require('stream'),
     ResponseParser = require('./lib/responseParser').ResponseParser,
-    responseTypes = ResponseParser.responseTypes
+    responseTypes = ResponseParser.responseTypes,
     util = require('util'),
     defaultPort = 8673,
     defaultHost = '127.0.0.1'
@@ -44,7 +43,7 @@ var net = require('net'),
  */
 function BloomClient(stream, options) {
   this.options = options
-  this.responseParser = new ResponseParser(this)
+  this.responseParser = null
 
   // Connection handling
   this.disposed = false
@@ -86,12 +85,6 @@ function BloomClient(stream, options) {
 
   stream.on('drain', function () {
     self._drain()
-  })
-
-  this.stream.pipe(this.responseParser)
-
-  this.responseParser.on('readable', function() {
-    self._onReadable()
   })
 
   events.EventEmitter.call(this)
@@ -458,6 +451,14 @@ BloomClient.prototype._onConnect = function () {
   }
 
   this.unavailable = false
+
+  this.responseParser = new ResponseParser(this)
+  this.stream.pipe(this.responseParser)
+
+  var self = this
+  this.responseParser.on('readable', function() {
+    self._onReadable()
+  })
 
   this.emit('connected')
   this._drain()
