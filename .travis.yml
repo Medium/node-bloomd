@@ -7,7 +7,7 @@ node_js:
 env:
 - CXX=g++-4.8
 before_install:
-- sudo apt-get install -qq update
+- sudo apt-get -qq update
 - sudo apt-get install -y scons
 - git clone https://armon@github.com/armon/bloomd.git /tmp/bloomd
 - pushd /tmp/bloomd
