@@ -1,3 +1,4 @@
+[![Build Status](https://travis-ci.org/Medium/node-bloomd.svg?branch=master)](https://travis-ci.org/Medium/node-bloomd)
 node-bloomd
 ===========
 
