@@ -7,9 +7,9 @@ node_js:
 env:
 - CXX=g++-4.8
 before_install:
+- apt-get install scons
 - git clone https://armon@github.com/armon/bloomd.git /tmp/bloomd
 - pushd /tmp/bloomd
-- pip install SCons
 - scons
 - sudo cp ./bloomd /usr/local/bin/
 - popd
