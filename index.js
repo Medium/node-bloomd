@@ -460,6 +460,7 @@ BloomClient.prototype._onConnect = function () {
     self._onReadable()
   })
 
+  this.connected = true
   this.emit('connected')
   this._drain()
 }
