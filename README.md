@@ -43,16 +43,16 @@ Create a client, then call bloomd commands directly on it. A simple example:
   }
 
   client.list(null, bloomd.print)
-  client.create('newFilter', printer)
+  client.create('newFilter', {}, printer)
   client.info('newFilter', bloomd.print)
-  client.check('newFilter', 'monkey', printer) 
+  client.check('newFilter', 'monkey', printer)
   client.set('newFilter', 'monkey', printer)
-  client.check('newFilter', 'monkey', printer) 
-  client.bulk('newFilter', ['monkey', 'magic', 'muppet'], printer) 
-  client.multi('newFilter', ['monkey', 'magic', 'muppet'], printer) 
+  client.check('newFilter', 'monkey', printer)
+  client.bulk('newFilter', ['monkey', 'magic', 'muppet'], printer)
+  client.multi('newFilter', ['monkey', 'magic', 'muppet'], printer)
   client.info('newFilter', bloomd.print)
-  client.drop('newFilter', printer) 
-  client.dispose() 
+  client.drop('newFilter', printer)
+  client.dispose()
 ```
 
 Client Options
